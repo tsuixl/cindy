@@ -2424,6 +2424,7 @@ export default function SessionScreen() {
     composerQuoteCount,
     composerSendUnavailableReason,
     draft,
+    i18nInstance.language,
     queueBusy,
     sending,
     voiceState,
