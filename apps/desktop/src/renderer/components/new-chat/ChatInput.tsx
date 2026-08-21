@@ -151,7 +151,12 @@ import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { PermissionSelector } from './PermissionSelector';
 import { ExtraDirsButton, type CollaborationMenuConfig } from './ExtraDirsButton';
 import { expandHostCapabilityInvocation } from '../../cindy-brain/hostCapabilityInvocation';
-import { focusComposerEndNextFrame, hostCapabilityForGhost, placeGhostAtComposerStart, placeHostCapabilityAtComposerStart } from './ghostComposerPlacement';
+import {
+  focusComposerEndNextFrame,
+  hostCapabilityForGhost,
+  placeGhostAtComposerStart,
+  placeHostCapabilityAtComposerStart,
+} from './ghostComposerPlacement';
 import { NewGoalDialog } from './NewGoalDialog';
 import { PlanModeIndicator } from './PlanModeIndicator';
 import {
@@ -331,7 +336,7 @@ import {
   isRemoteOptimisticDataOwnerBoundaryError,
   isRemoteOptimisticSessionPurgedError,
   makerChatStore,
-	wasLastStopSideTask,
+  wasLastStopSideTask,
 } from '@/lib/makerChatStore';
 // 切模型前的上下文容量预检(大窗口 → 小窗口护栏), 纯函数与 main 共用。
 import { assessModelSwitchContext } from '../../../shared/modelSwitchAssessment';
@@ -385,6 +390,18 @@ const ComposerHardBreak = HardBreak.extend({
 // 自然宽度（permission + model + voice + send 等）估，实测可微调。
 const TOOLBAR_DENSE_MAX_WIDTH = 520;
 const TOOLBAR_COMPACT_MAX_WIDTH = 448;
+const TOOLBAR_NARROW_MAX_WIDTH = 600;
+const TOOLBAR_ULTRA_COMPACT_MAX_WIDTH = 420;
+
+type ToolbarWidthMode = 'unmeasured' | 'wide' | 'narrow' | 'dense' | 'compact' | 'ultra';
+
+function resolveToolbarWidthMode(width: number): ToolbarWidthMode {
+  if (width < TOOLBAR_ULTRA_COMPACT_MAX_WIDTH) return 'ultra';
+  if (width < TOOLBAR_COMPACT_MAX_WIDTH) return 'compact';
+  if (width < TOOLBAR_DENSE_MAX_WIDTH) return 'dense';
+  if (width < TOOLBAR_NARROW_MAX_WIDTH) return 'narrow';
+  return 'wide';
+}
 
 // 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
 // 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
@@ -1266,7 +1283,14 @@ export function ChatInput({
     //   undefined = 所有权尚未解析 → 跳过预测（device-link 引导/重连窗口期归属未定，
     //               远程转写可能被误送到本地 provider，故 fail-closed）
     //   string = 远程会话 → 被下面 deviceLinkDeviceId === null 拦截
-    if (wasRunning && !showStopButton && recommendationEnabled && sessionId && deviceLinkDeviceId === null && !remoteHostId) {
+    if (
+      wasRunning &&
+      !showStopButton &&
+      recommendationEnabled &&
+      sessionId &&
+      deviceLinkDeviceId === null &&
+      !remoteHostId
+    ) {
       // 当 composer 被禁用时（如 reviewer 任务完成后 read-only），不应触发
       // 预测：用户无法 Tab 填入或发送，发起 provider 调用是浪费。
       // 读取 disabled prop 而非 disabledRef：disabledRef 由后续 effect 刷新，
@@ -1283,20 +1307,15 @@ export function ChatInput({
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
       if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
-	      // side-task（skipTurnReset 如 Mivo 侧通道）结束时，store 将 running 翻为
-	      // false 但未产生新的 assistant 回复，不应在对话内容未变时发起付费预测。
-	      if (wasLastStopSideTask(sessionId)) return;
+      // side-task（skipTurnReset 如 Mivo 侧通道）结束时，store 将 running 翻为
+      // false 但未产生新的 assistant 回复，不应在对话内容未变时发起付费预测。
+      if (wasLastStopSideTask(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;
       const latestMessages = messagesRef.current;
       const ed = editorRef.current;
-      if (
-        latestMessages.length > 0 &&
-        ed &&
-        !ed.isDestroyed &&
-        composerFullyEmptyRef.current()
-      ) {
+      if (latestMessages.length > 0 && ed && !ed.isDestroyed && composerFullyEmptyRef.current()) {
         const contextMsgs = latestMessages.slice(-20).map((m) => ({
           role: m.role,
           content: m.content,
@@ -1388,20 +1407,30 @@ export function ChatInput({
   // ── 工具行宽度自适应 ────────────────────────────────────────────────
   // 测 input card（mergedCardRef）实际宽度，窄宽时自动收紧工具行。主会话被右栏
   // 拖宽压窄时据此折叠，行为对齐 doc rail（doc rail 仍按 denseToolbar 强制收紧，
-  // 二者取 OR）。ResizeObserver 只读宽度、值不变时 React 跳过 setState，不影响
-  // 输入热路径。
-  const [toolbarWidth, setToolbarWidth] = useState<number | null>(null);
+  // 二者取 OR）。窗口连续 resize 时只在跨越离散断点后更新 React；同一档位内的
+  // 逐像素变化完全交给 CSS 布局，不再重渲染整棵 ChatInput。
+  const [toolbarWidthMode, setToolbarWidthMode] = useState<ToolbarWidthMode>('unmeasured');
   useLayoutEffect(() => {
     const el = mergedCardRef.current;
     if (!el) return;
-    const update = () => setToolbarWidth(el.clientWidth);
+    const update = () => {
+      const nextMode = resolveToolbarWidthMode(el.clientWidth);
+      setToolbarWidthMode((currentMode) => (currentMode === nextMode ? currentMode : nextMode));
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const autoDenseToolbar = toolbarWidth != null && toolbarWidth < TOOLBAR_DENSE_MAX_WIDTH;
-  const autoCompactToolbar = toolbarWidth != null && toolbarWidth < TOOLBAR_COMPACT_MAX_WIDTH;
+  const toolbarWidthMeasured = toolbarWidthMode !== 'unmeasured';
+  const autoNarrowToolbar =
+    toolbarWidthMode === 'narrow' ||
+    toolbarWidthMode === 'dense' ||
+    toolbarWidthMode === 'compact' ||
+    toolbarWidthMode === 'ultra';
+  const autoDenseToolbar =
+    toolbarWidthMode === 'dense' || toolbarWidthMode === 'compact' || toolbarWidthMode === 'ultra';
+  const autoCompactToolbar = toolbarWidthMode === 'compact' || toolbarWidthMode === 'ultra';
   const effectiveDenseToolbar = denseToolbar || autoDenseToolbar;
   const effectiveCompactToolbar = compactToolbar || autoCompactToolbar;
 
@@ -2915,52 +2944,49 @@ export function ChatInput({
   );
   // 统一建议面板的插件条目(旧 `+` 菜单口径的并集):可用项可选,无指令或
   // Host 入口或未生效项保留展示但置灰(entry 级 disabled + 原因)。
-  const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(
-    () => {
-      // device-link 会话的插件运行在被控端；控制端清单既不代表远端已安装
-      // 状态，选择后也无法用本地 InstalledGhost 解析并插入命令。fail-closed：
-      // 仅 deviceLinkDeviceId === null（已确认本机）才展示；undefined（所有权
-      // 尚未解析）与 string（远程）一律隐藏，避免 bootstrap/重连窗口期把控制端
-      // 本地插件项泄漏进可能落为远程的会话。
-      if (deviceLinkDeviceId !== null) return [];
-      return pluginsForMenu.map((ghost) => {
-        const hasCommand = !!ghost.manifest.command;
-        const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
-        const hasComposerEntry = hasCommand || hostCapability !== null;
-        const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasComposerEntry;
-        const entryKey = ghost.manifest.command ?? hostCapability ?? '';
-        return {
-          item: {
-            type: 'plugin-command' as const,
-            name: ghost.manifest.name,
-            relPath:
-              ghost.manifest.command ??
-              (hostCapability
-                ? `cindy://host-capability/${hostCapability}`
-                : `cindy://plugin/${ghost.manifest.id}`),
-            pluginId: ghost.manifest.id,
-            ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
-            sourceLabel: entryKey,
-            _nameLower: `${ghost.manifest.name} ${entryKey}`.toLowerCase(),
-            _relPathLower: `${entryKey} ${ghost.manifest.id}`.toLowerCase(),
-          },
-          ...(selectable
-            ? {}
-            : {
-                disabled: true,
-                disabledReason: t(
-                  !pluginAvailableIds.has(ghost.manifest.id)
-                    ? 'extraDirs.pluginDisabled'
-                    : ghost.manifest.slots.includes('skill')
-                      ? 'extraDirs.pluginAgentInvoked'
-                      : 'extraDirs.pluginNoCommand',
-                ),
-              }),
-        };
-      });
-    },
-    [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t],
-  );
+  const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(() => {
+    // device-link 会话的插件运行在被控端；控制端清单既不代表远端已安装
+    // 状态，选择后也无法用本地 InstalledGhost 解析并插入命令。fail-closed：
+    // 仅 deviceLinkDeviceId === null（已确认本机）才展示；undefined（所有权
+    // 尚未解析）与 string（远程）一律隐藏，避免 bootstrap/重连窗口期把控制端
+    // 本地插件项泄漏进可能落为远程的会话。
+    if (deviceLinkDeviceId !== null) return [];
+    return pluginsForMenu.map((ghost) => {
+      const hasCommand = !!ghost.manifest.command;
+      const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
+      const hasComposerEntry = hasCommand || hostCapability !== null;
+      const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasComposerEntry;
+      const entryKey = ghost.manifest.command ?? hostCapability ?? '';
+      return {
+        item: {
+          type: 'plugin-command' as const,
+          name: ghost.manifest.name,
+          relPath:
+            ghost.manifest.command ??
+            (hostCapability
+              ? `cindy://host-capability/${hostCapability}`
+              : `cindy://plugin/${ghost.manifest.id}`),
+          pluginId: ghost.manifest.id,
+          ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
+          sourceLabel: entryKey,
+          _nameLower: `${ghost.manifest.name} ${entryKey}`.toLowerCase(),
+          _relPathLower: `${entryKey} ${ghost.manifest.id}`.toLowerCase(),
+        },
+        ...(selectable
+          ? {}
+          : {
+              disabled: true,
+              disabledReason: t(
+                !pluginAvailableIds.has(ghost.manifest.id)
+                  ? 'extraDirs.pluginDisabled'
+                  : ghost.manifest.slots.includes('skill')
+                    ? 'extraDirs.pluginAgentInvoked'
+                    : 'extraDirs.pluginNoCommand',
+              ),
+            }),
+      };
+    });
+  }, [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t]);
   useEffect(() => {
     setGhostCommandRoster(editor, ghostsForCommand);
   }, [editor, ghostsForCommand]);
@@ -3050,10 +3076,7 @@ export function ChatInput({
         persistKey &&
         persistKey === editorStorageKey
       ) {
-        armDetachedVoiceDraftPersist(
-          persistKey,
-          voiceDraftTextRef.current.trim(),
-        );
+        armDetachedVoiceDraftPersist(persistKey, voiceDraftTextRef.current.trim());
       }
     };
   }, [editor]);
@@ -3091,7 +3114,10 @@ export function ChatInput({
   useEffect(() => {
     if (
       recommendedPromptRef.current &&
-      (attachments.length > 0 || browserComments.length > 0 || composerMutationLocked || voiceInput.draftText.trim().length > 0)
+      (attachments.length > 0 ||
+        browserComments.length > 0 ||
+        composerMutationLocked ||
+        voiceInput.draftText.trim().length > 0)
     ) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
@@ -3869,8 +3895,7 @@ export function ChatInput({
       // 阻塞用户发送正文。仅已确认本机(deviceLinkDeviceId === null 且无
       // remoteHostId)才恢复,否则静默丢弃芯片意图。
       const dlDeviceId = deviceLinkDeviceIdRef.current;
-      const canPlaceHostCapability =
-        !remoteHostIdRef.current && dlDeviceId === null;
+      const canPlaceHostCapability = !remoteHostIdRef.current && dlDeviceId === null;
       // 归属未解析(deviceLinkDeviceId === undefined)且非 SSH 时延后决定:不清除
       // pendingHostCapabilityGhostId,等归属解析后 effect 重跑。若此时清除,
       // 后续解析成本机也无法恢复芯片,Host 插件(如 iOS Simulator)的"使用"
@@ -4141,9 +4166,13 @@ export function ChatInput({
   useEffect(() => {
     reloadSlashCommands();
   }, [reloadSlashCommands]);
-  useEffect(() => window.electronAPI.maker.onPiPackagesChanged(() => {
-    reloadSlashCommands({ forceReload: true });
-  }), [reloadSlashCommands]);
+  useEffect(
+    () =>
+      window.electronAPI.maker.onPiPackagesChanged(() => {
+        reloadSlashCommands({ forceReload: true });
+      }),
+    [reloadSlashCommands],
+  );
   // Slash 指令与 $意识一致:doc 保持可逐字编辑的普通文本,完整命中当前 roster
   // 时才由 decoration 显示确认胶囊。异步 roster 刷新不进入 keystroke 热路径。
   useEffect(() => {
@@ -4680,13 +4709,7 @@ export function ChatInput({
             tr.replaceWith(from, runEnd, editor.schema.text(`$${cmd.name} `));
           } else {
             // 展示层写入人类名(`/git`);Pi 线路名(`/skill:git`)只在发送期改写。
-            replaceSlashCommandRunWithText(
-              tr,
-              editor.schema,
-              from,
-              runEnd,
-              cmd.name,
-            );
+            replaceSlashCommandRunWithText(tr, editor.schema, from, runEnd, cmd.name);
           }
           return true;
         })
@@ -4839,13 +4862,7 @@ export function ChatInput({
         .run();
       closeAtPanel();
     },
-    [
-      closeAtPanel,
-      editor,
-      effectiveAt,
-      resolveEffectiveAtRange,
-      setSyntheticAtAnchor,
-    ],
+    [closeAtPanel, editor, effectiveAt, resolveEffectiveAtRange, setSyntheticAtAnchor],
   );
 
   const handleComposerSuggestionSelect = useCallback(
@@ -4943,8 +4960,7 @@ export function ChatInput({
       // click-time snapshot is cleared. A background source send after a
       // session switch must not lock the newly restored composer.
       const lockCurrentComposer =
-        !optimisticallyClearRemoteComposer &&
-        storageKeyForDraftRef.current === sourceStorageKey;
+        !optimisticallyClearRemoteComposer && storageKeyForDraftRef.current === sourceStorageKey;
       if (lockCurrentComposer) {
         captureSendFocusForRestore();
         setSendDispatchInFlight(true);
@@ -5542,10 +5558,7 @@ export function ChatInput({
               ]);
             } finally {
               if (timeoutId !== undefined) clearTimeout(timeoutId);
-              if (
-                lockComposerForEffort &&
-                storageKeyForDraftRef.current === sourceStorageKey
-              ) {
+              if (lockComposerForEffort && storageKeyForDraftRef.current === sourceStorageKey) {
                 setSendDispatchInFlight(false);
               }
             }
@@ -5604,10 +5617,7 @@ export function ChatInput({
         if (!optimisticallyClearRemoteComposer) clearSentComposer();
       } finally {
         dispatchSendInFlightKeysRef.current.delete(sendInFlightKey);
-        if (
-          lockCurrentComposer &&
-          storageKeyForDraftRef.current === sourceStorageKey
-        ) {
+        if (lockCurrentComposer && storageKeyForDraftRef.current === sourceStorageKey) {
           setSendDispatchInFlight(false);
         }
         finishAgentSendDispatch();
@@ -5857,19 +5867,14 @@ export function ChatInput({
         opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId;
       const markModelChoice = opts.markModelChoice === true;
       if (!remoteDeviceId) {
-        const vendor =
-          agentKind === 'codex'
-            ? 'codex'
-            : agentKind === 'pi'
-              ? 'pi'
-              : 'cc';
-        const persistPrefs = markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice;
+        const vendor = agentKind === 'codex' ? 'codex' : agentKind === 'pi' ? 'pi' : 'cc';
+        const persistPrefs = markModelChoice
+          ? patchVendorPrefs
+          : patchVendorPrefsPreservingModelChoice;
         persistPrefs(vendor, {
           // 换模才带配对并打标记。本机只改思考档 / Fast 不写回活动模型,
           // 避免未打标用户把区域默认改成当前任务模型。
-          ...(markModelChoice
-            ? { model: modelId, providerId: activeProviderId ?? null }
-            : {}),
+          ...(markModelChoice ? { model: modelId, providerId: activeProviderId ?? null } : {}),
           ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
         });
         if (memoryProviderId) {
@@ -5951,9 +5956,9 @@ export function ChatInput({
           })) !== false
         );
       }
-      const sourceRemoteDeviceId = (sessionId
-        ? (deviceLinkDeviceId ?? getSessionDeviceId(sessionId))
-        : deviceLinkDeviceId) ?? undefined;
+      const sourceRemoteDeviceId =
+        (sessionId ? (deviceLinkDeviceId ?? getSessionDeviceId(sessionId)) : deviceLinkDeviceId) ??
+        undefined;
       const persisted = await persistFastModeChange(enabled, {
         remoteDeviceId: sourceRemoteDeviceId,
       });
@@ -6072,7 +6077,10 @@ export function ChatInput({
         // 真源必须用 `runtimeAgentKind`,绝不能用 vendorKey / 意图目标 —— 那两个在意图期
         // 会翻到目标引擎,把「继续切到意图目标」错判成同引擎、把确认框跳过。
         hasSwitchIntent:
-          !!sessionId && !!targetAgent && runtimeAgentKind != null && runtimeAgentKind === targetAgent,
+          !!sessionId &&
+          !!targetAgent &&
+          runtimeAgentKind != null &&
+          runtimeAgentKind === targetAgent,
         confirm: confirmDialog,
         copy: {
           title: t('newChat.chatInput.agentSwitch.confirmation.title'),
@@ -6649,10 +6657,7 @@ export function ChatInput({
 
       // model-only 不改变当前生效来源；effort 能力也必须按该来源精确解析，避免同 id 的
       // 内置模型档位穿进 BYOM。恢复优先级:模型预设 > 旧 per-model 记忆 > 沿用当前 > 模型默认。
-      const { efforts, defaultEffort } = resolveModelEfforts(
-        newModelId,
-        effectiveSourceId,
-      );
+      const { efforts, defaultEffort } = resolveModelEfforts(newModelId, effectiveSourceId);
       const providerEffort =
         modelMemory && currentModelAgentKind && effectiveSourceId
           ? modelMemory.getEffort(currentModelAgentKind, effectiveSourceId, newModelId)
@@ -6758,9 +6763,13 @@ export function ChatInput({
               // 默认 success 1200ms 读不完这句;拉长到 4s。
               toast.success(t('newChat.chatInput.credentialSwitchDeferred'), { duration: 4000 });
             }
-            syncSessionDraftModelPrefs(newModelId, { effort: newEffort, fast: restoredFast }, {
-              markModelChoice: true,
-            });
+            syncSessionDraftModelPrefs(
+              newModelId,
+              { effort: newEffort, fast: restoredFast },
+              {
+                markModelChoice: true,
+              },
+            );
             if (currentModelAgentKind && effectiveSourceId) {
               modelMemory?.setFast(
                 currentModelAgentKind,
@@ -7521,8 +7530,7 @@ export function ChatInput({
   const hasMessage = !isEditorEmpty(editor);
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
-  const hasVoiceDraftText =
-    voiceBusyOnCurrentComposer && voiceInput.draftText.trim().length > 0;
+  const hasVoiceDraftText = voiceBusyOnCurrentComposer && voiceInput.draftText.trim().length > 0;
   // 推荐 overlay 的可见判据:开关开启 + 有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 输入框未锁定。
   // composerMutationLocked 涵盖 disabled、sendDispatchInFlight、当前输入框所属语音及远程只读/锁定状态。
   const showRecommendationOverlay =
@@ -7606,10 +7614,11 @@ export function ChatInput({
   // split-pane 同时打开侧栏 / 会话 / 浏览器时，普通会话 composer 也会落到窄容器。
   // 这里必须按 card 实际宽度统一切 compact，而不是只照顾 create-agent；否则普通
   // 会话仍走两组 max-content flex，长模型名会把权限入口挤进语音 / 发送固定动作区。
-  const useNarrowToolbar = narrowToolbar || (toolbarWidth != null && toolbarWidth < 600);
+  const useNarrowToolbar = narrowToolbar || autoNarrowToolbar;
   const useCompactMiddleToolbar =
-    isCreateAgentVariant && (toolbarWidth == null ? narrowToolbar : toolbarWidth < 600);
-  const useUltraCompactToolbar = useNarrowToolbar && (toolbarWidth == null || toolbarWidth < 420);
+    isCreateAgentVariant && (toolbarWidthMeasured ? autoNarrowToolbar : narrowToolbar);
+  const useUltraCompactToolbar =
+    useNarrowToolbar && (!toolbarWidthMeasured || toolbarWidthMode === 'ultra');
 
   return (
     <div className="relative flex w-full flex-col items-center gap-4" data-chat-input-root>
