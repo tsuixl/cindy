@@ -12,6 +12,7 @@ import {
   RESOURCE_USAGE_WINDOW_SAMPLING_ACTIVE_CHANNEL,
 } from '../../shared/resourceUsageWindow.js';
 
+import { t } from '../i18n.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('resource-usage-window-controller');
@@ -118,7 +119,16 @@ export class ResourceUsageWindowController {
     this.locale = locale;
     const win = this.winRef;
     if (!win || win.isDestroyed()) return;
+    this.setNativeTitle(win, locale);
     this.sendLocale(win, locale);
+  }
+
+  private setNativeTitle(win: BrowserWindow, locale: SupportedLocale): void {
+    try {
+      win.setTitle(t('titleBar.menuItems.resourceUsage', locale));
+    } catch {
+      // 窗口可能在 isDestroyed 检查与 setTitle 之间被系统销毁。
+    }
   }
 
   private sendLocale(win: BrowserWindow, locale: SupportedLocale): void {
@@ -172,7 +182,10 @@ export class ResourceUsageWindowController {
     this.visible = false;
     this.samplingActive = true;
     this.destroyingWindow = false;
-    if (this.locale) this.sendLocale(win, this.locale);
+    if (this.locale) {
+      this.setNativeTitle(win, this.locale);
+      this.sendLocale(win, this.locale);
+    }
     win.on('close', (event) => {
       if (this.destroyingWindow || this.disposed) return;
       event.preventDefault();
