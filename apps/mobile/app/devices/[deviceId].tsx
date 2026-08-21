@@ -328,7 +328,7 @@ export default function DeviceDetailScreen() {
       sections,
       statusFilter,
     }),
-    [filterCounts, searchQuery, sections, statusFilter],
+    [filterCounts, searchQuery, sections, statusFilter, t],
   );
   const visibleSessionIds = useMemo(() => visibleSessionIdsFromSections(sections), [sections]);
   const selectedSessionIdSet = useMemo(() => new Set(selectedSessionIds), [selectedSessionIds]);
@@ -352,7 +352,7 @@ export default function DeviceDetailScreen() {
   const runningAutomationCount = filterCounts.runningAutomation;
   const controlsSummary = useMemo(
     () => remoteSessionControlsSummary(statusFilter, filterCounts),
-    [filterCounts, statusFilter],
+    [filterCounts, statusFilter, t],
   );
   const windowLayout = buildMainWindowLayout({
     actionCount: 3,
@@ -362,7 +362,7 @@ export default function DeviceDetailScreen() {
   });
   const emptyState = useMemo(
     () => deviceSessionEmptyState(statusFilter, searchQuery),
-    [searchQuery, statusFilter],
+    [searchQuery, statusFilter, t],
   );
   // 首同步完成前(lastSyncedAt === null)抑制"还没有对话"空状态,避免冷进(deep link)先闪空态
   // 再跳成真列表(规则 7:不闪空白/不跳变)。同步失败时 ConnectionBanner 已有错误 + 重试入口。

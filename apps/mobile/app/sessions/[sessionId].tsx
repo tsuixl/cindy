@@ -9603,7 +9603,7 @@ export default function SessionScreen() {
                       <ComposerRichInput
                         ref={composerInputRef}
                         accessibilityHint={composerLayout.input.disabledReason ?? undefined}
-                        accessibilityLabel="输入远程消息"
+                        accessibilityLabel={t('session.screen.composerPlaceholder')}
                         document={composerDocument}
                         editable={!composerLayout.input.disabled}
                         height={composerInputVisibleHeight}
